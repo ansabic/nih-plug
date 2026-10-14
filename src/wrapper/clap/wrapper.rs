@@ -3153,14 +3153,33 @@ impl<P: ClapPlugin> Wrapper<P> {
         }
         let length = u64::from_le_bytes(length_bytes);
 
-        let mut read_buffer: Vec<u8> = Vec::with_capacity(length as usize);
-        if !read_stream(&*stream, read_buffer.spare_capacity_mut()) {
+        // The length prefix comes from untrusted data (a corrupt or foreign project file), so it
+        // must not drive a single up-front allocation: a random length used to abort the host
+        // process. Reject absurd sizes and grow the buffer as data actually arrives.
+        const MAX_STATE_BYTES: u64 = 256 * 1024 * 1024;
+        if length > MAX_STATE_BYTES {
             nih_debug_assert_failure!(
-                "Error or end of stream while reading the state buffer from the stream."
+                "Refusing to load a {} byte state, the limit is {} bytes.",
+                length,
+                MAX_STATE_BYTES
             );
             return false;
         }
-        read_buffer.set_len(length as usize);
+
+        const CHUNK_BYTES: usize = 64 * 1024;
+        let length = length as usize;
+        let mut read_buffer: Vec<u8> = Vec::new();
+        while read_buffer.len() < length {
+            let start = read_buffer.len();
+            let chunk = CHUNK_BYTES.min(length - start);
+            read_buffer.resize(start + chunk, 0);
+            if !read_stream(&*stream, &mut read_buffer[start..]) {
+                nih_debug_assert_failure!(
+                    "Error or end of stream while reading the state buffer from the stream."
+                );
+                return false;
+            }
+        }
 
         match state::deserialize_json(&read_buffer) {
             Some(mut state) => {
