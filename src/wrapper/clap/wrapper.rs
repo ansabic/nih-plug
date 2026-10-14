@@ -3186,6 +3186,13 @@ impl<P: ClapPlugin> Wrapper<P> {
                 let success = wrapper.set_state_inner(&mut state);
                 if success {
                     nih_trace!("Loaded state ({} bytes)", read_buffer.len());
+
+                    // CLAP requires the plugin to ask the host to re-read parameter values after
+                    // a state load. Without it hosts keep showing the pre-load values
+                    // (clap-validator `state-reproducibility-*`). The GUI-initiated path in
+                    // `set_state_object_from_gui()` already does this.
+                    let task_posted = wrapper.schedule_gui(Task::RescanParamValues);
+                    nih_debug_assert!(task_posted, "The task queue is full, dropping task...");
                 }
 
                 success
