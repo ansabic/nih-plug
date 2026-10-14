@@ -2711,26 +2711,67 @@ impl<P: ClapPlugin> Wrapper<P> {
         true
     }
 
-    unsafe extern "C" fn ext_gui_can_resize(_plugin: *const clap_plugin) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        false
+    unsafe extern "C" fn ext_gui_can_resize(plugin: *const clap_plugin) -> bool {
+        check_null_ptr!(false, plugin, (*plugin).plugin_data);
+        let wrapper = &*((*plugin).plugin_data as *const Self);
+
+        let editor = wrapper.editor.borrow();
+        editor.as_ref().is_some_and(|e| e.lock().can_resize())
     }
 
     unsafe extern "C" fn ext_gui_get_resize_hints(
-        _plugin: *const clap_plugin,
-        _hints: *mut clap_gui_resize_hints,
+        plugin: *const clap_plugin,
+        hints: *mut clap_gui_resize_hints,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        false
+        check_null_ptr!(false, plugin, (*plugin).plugin_data, hints);
+        let wrapper = &*((*plugin).plugin_data as *const Self);
+
+        let editor = wrapper.editor.borrow();
+        let Some(editor) = editor.as_ref().map(|e| e.lock()) else {
+            return false;
+        };
+        if !editor.can_resize() {
+            return false;
+        }
+        let aspect = editor.aspect_ratio();
+        *hints = clap_gui_resize_hints {
+            can_resize_horizontally: true,
+            can_resize_vertically: true,
+            preserve_aspect_ratio: aspect.is_some(),
+            aspect_ratio_width: aspect.map_or(0, |(w, _)| w),
+            aspect_ratio_height: aspect.map_or(0, |(_, h)| h),
+        };
+
+        true
     }
 
     unsafe extern "C" fn ext_gui_adjust_size(
-        _plugin: *const clap_plugin,
-        _width: *mut u32,
-        _height: *mut u32,
+        plugin: *const clap_plugin,
+        width: *mut u32,
+        height: *mut u32,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        false
+        check_null_ptr!(false, plugin, (*plugin).plugin_data, width, height);
+        let wrapper = &*((*plugin).plugin_data as *const Self);
+
+        let editor = wrapper.editor.borrow();
+        let Some(editor) = editor.as_ref().map(|e| e.lock()) else {
+            return false;
+        };
+        if !editor.can_resize() {
+            return false;
+        }
+        // CLAP sizes are physical pixels except on macOS; the editor works in logical pixels
+        let scaling_factor = wrapper.editor_scaling_factor.load(Ordering::Relaxed);
+        let (w, h) = editor.constrain_size(
+            (*width as f32 / scaling_factor).round() as u32,
+            (*height as f32 / scaling_factor).round() as u32,
+        );
+        (*width, *height) = (
+            (w as f32 * scaling_factor).round() as u32,
+            (h as f32 * scaling_factor).round() as u32,
+        );
+
+        true
     }
 
     unsafe extern "C" fn ext_gui_set_size(
@@ -2738,20 +2779,32 @@ impl<P: ClapPlugin> Wrapper<P> {
         width: u32,
         height: u32,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        // TODO: The host will also call this if an asynchronous (on Linux) resize request fails
+        // The host also calls this if an asynchronous (on Linux) resize request fails
         check_null_ptr!(false, plugin, (*plugin).plugin_data);
         let wrapper = &*((*plugin).plugin_data as *const Self);
 
-        let (unscaled_width, unscaled_height) =
-            wrapper.editor.borrow().as_ref().unwrap().lock().size();
+        let editor = wrapper.editor.borrow();
+        let Some(editor) = editor.as_ref().map(|e| e.lock()) else {
+            return false;
+        };
         let scaling_factor = wrapper.editor_scaling_factor.load(Ordering::Relaxed);
+        let (unscaled_width, unscaled_height) = editor.size();
         let (editor_width, editor_height) = (
             (unscaled_width as f32 * scaling_factor).round() as u32,
             (unscaled_height as f32 * scaling_factor).round() as u32,
         );
+        if width == editor_width && height == editor_height {
+            return true;
+        }
+        if !editor.can_resize() {
+            return false;
+        }
 
-        width == editor_width && height == editor_height
+        let (w, h) = (
+            (width as f32 / scaling_factor).round() as u32,
+            (height as f32 / scaling_factor).round() as u32,
+        );
+        editor.constrain_size(w, h) == (w, h) && editor.set_size(w, h)
     }
 
     unsafe extern "C" fn ext_gui_set_parent(

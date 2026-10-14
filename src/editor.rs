@@ -73,7 +73,31 @@ pub trait Editor: Send {
     //       and API agnostic, add a way to ask the GuiContext if the wrapper already provides a
     //       tick function. If it does not, then the Editor implementation must handle this by
     //       itself. This would also need an associated `PREFERRED_FRAME_RATE` constant.
-    // TODO: Host->Plugin resizing
+
+    /// Whether the host may resize the editor, e.g. by dragging its window's edge. If this returns
+    /// `true`, implement [`set_size()`][Self::set_size()] and usually
+    /// [`constrain_size()`][Self::constrain_size()] as well. Sizes in these functions are logical
+    /// pixels, like [`size()`][Self::size()].
+    fn can_resize(&self) -> bool {
+        false
+    }
+
+    /// An aspect ratio (width, height) the host should keep while resizing, if any.
+    fn aspect_ratio(&self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// Returns the size closest to a size the host proposes that the editor accepts.
+    fn constrain_size(&self, _width: u32, _height: u32) -> (u32, u32) {
+        self.size()
+    }
+
+    /// The host resized the editor's window to this size (already passed through
+    /// [`constrain_size()`][Self::constrain_size()]). Resize the editor's own window to match and
+    /// make [`size()`][Self::size()] return it. Returns `false` if the size can't be used.
+    fn set_size(&self, _width: u32, _height: u32) -> bool {
+        false
+    }
 }
 
 /// A raw window handle for platform and GUI framework agnostic editors. This implements
