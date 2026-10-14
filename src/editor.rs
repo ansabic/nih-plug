@@ -92,9 +92,13 @@ pub trait Editor: Send {
         self.size()
     }
 
-    /// The host resized the editor's window to this size (already passed through
-    /// [`constrain_size()`][Self::constrain_size()]). Resize the editor's own window to match and
-    /// make [`size()`][Self::size()] return it. Returns `false` if the size can't be used.
+    /// The host resized the editor's window to this size. Resize the editor's own window to match
+    /// and make [`size()`][Self::size()] return it. Returns `false` if the size can't be used.
+    ///
+    /// Hosts usually pass sizes from [`constrain_size()`][Self::constrain_size()], but not always:
+    /// during a live drag some keep growing the window past what it allows. Editors should fill
+    /// any size they are given (e.g. letterbox) rather than refuse, or the host and the editor
+    /// disagree about the window size.
     fn set_size(&self, _width: u32, _height: u32) -> bool {
         false
     }

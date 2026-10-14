@@ -398,7 +398,6 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
             (width as f32 / scaling_factor).round() as u32,
             (height as f32 / scaling_factor).round() as u32,
         );
-        let (w, h) = editor.constrain_size(w, h);
         if editor.set_size(w, h) {
             kResultOk
         } else {

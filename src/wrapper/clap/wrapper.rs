@@ -2804,7 +2804,7 @@ impl<P: ClapPlugin> Wrapper<P> {
             (width as f32 / scaling_factor).round() as u32,
             (height as f32 / scaling_factor).round() as u32,
         );
-        editor.constrain_size(w, h) == (w, h) && editor.set_size(w, h)
+        editor.set_size(w, h)
     }
 
     unsafe extern "C" fn ext_gui_set_parent(
