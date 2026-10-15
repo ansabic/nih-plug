@@ -126,6 +126,15 @@ pub struct Wrapper<P: ClapPlugin> {
     editor_scaling_factor: AtomicF32,
 
     is_processing: AtomicBool,
+    /// Whether the plugin is between `clap_plugin::activate()` and `deactivate()`, and whether
+    /// `activate()` is running right now. CLAP only lets the plugin report a latency change
+    /// (`clap_host_latency::changed()`) from within `activate()`; while active it must request a
+    /// restart instead.
+    is_active: AtomicBool,
+    is_activating: AtomicBool,
+    /// The latency reported at the last activation, so `activate()` knows whether to tell the
+    /// host it changed.
+    activated_latency: AtomicU32,
     /// The current IO configuration, modified through the `clap_plugin_audio_ports_config`
     /// extension. Initialized to the plugin's first audio IO configuration.
     current_audio_io_layout: AtomicCell<AudioIOLayout>,
@@ -393,14 +402,13 @@ impl<P: ClapPlugin> MainThreadExecutor<Task<P>> for Wrapper<P> {
                 Some(host_latency) => {
                     nih_debug_assert!(is_gui_thread);
 
-                    // XXX: The CLAP docs mention that you should request a restart if this happens
-                    //      while the plugin is activated (which is not entirely the same thing as
-                    //      is processing, but we'll treat it as the same thing). In practice just
-                    //      calling the latency changed function also seems to work just fine.
-                    if self.is_processing.load(Ordering::SeqCst) {
+                    // CLAP only allows `clap_host_latency::changed()` from within
+                    // `clap_plugin::activate()`. While the plugin is active, request a restart:
+                    // the reactivation reports the new latency (see `activate()`). While it is
+                    // inactive the host reads the latency when it activates the plugin.
+                    let _ = host_latency;
+                    if self.is_active.load(Ordering::SeqCst) {
                         unsafe_clap_call! { &*self.host_callback=>request_restart(&*self.host_callback) };
-                    } else {
-                        unsafe_clap_call! { host_latency=>changed(&*self.host_callback) };
                     }
                 }
                 None => nih_debug_assert_failure!("Host does not support the latency extension"),
@@ -544,6 +552,9 @@ impl<P: ClapPlugin> Wrapper<P> {
             editor_scaling_factor: AtomicF32::new(1.0),
 
             is_processing: AtomicBool::new(false),
+            is_active: AtomicBool::new(false),
+            is_activating: AtomicBool::new(false),
+            activated_latency: AtomicU32::new(0),
             current_audio_io_layout: AtomicCell::new(
                 P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default(),
             ),
@@ -1739,7 +1750,8 @@ impl<P: ClapPlugin> Wrapper<P> {
         // XXX: For CLAP we could move this handling to the Plugin struct, but it may be worthwhile
         //      to keep doing it this way to stay consistent with VST3.
         let old_latency = self.current_latency.swap(samples, Ordering::SeqCst);
-        if old_latency != samples {
+        // During `activate()` the change is reported there, synchronously, as CLAP requires.
+        if old_latency != samples && !self.is_activating.load(Ordering::SeqCst) {
             let task_posted = self.schedule_gui(Task::LatencyChanged);
             nih_debug_assert!(task_posted, "The task queue is full, dropping task...");
         }
@@ -1892,7 +1904,25 @@ impl<P: ClapPlugin> Wrapper<P> {
         // NOTE: This needs to be dropped after the `plugin` lock to avoid deadlocks
         let mut init_context = wrapper.make_init_context();
         let mut plugin = wrapper.plugin.lock();
-        if plugin.initialize(&audio_io_layout, &buffer_config, &mut init_context) {
+        wrapper.is_activating.store(true, Ordering::SeqCst);
+        let initialized = plugin.initialize(&audio_io_layout, &buffer_config, &mut init_context);
+        wrapper.is_activating.store(false, Ordering::SeqCst);
+        if initialized {
+            // Report a latency that differs from the last activation, from within `activate()`
+            // (the only place CLAP allows it). This also covers a restart requested because the
+            // latency changed while active. The init context only records the latency, so take
+            // it here rather than letting its `Drop` schedule a needless restart.
+            if let Some(samples) = init_context.pending_requests.latency_changed.take() {
+                wrapper.current_latency.store(samples, Ordering::SeqCst);
+            }
+            let latency = wrapper.current_latency.load(Ordering::SeqCst);
+            if wrapper.activated_latency.swap(latency, Ordering::SeqCst) != latency {
+                if let Some(host_latency) = &*wrapper.host_latency.borrow() {
+                    unsafe_clap_call! { host_latency=>changed(&*wrapper.host_callback) };
+                }
+            }
+            wrapper.is_active.store(true, Ordering::SeqCst);
+
             // NOTE: `Plugin::reset()` is called in `clap_plugin::start_processing()` instead of in
             //       this function
 
@@ -1914,6 +1944,7 @@ impl<P: ClapPlugin> Wrapper<P> {
         check_null_ptr!((), plugin, (*plugin).plugin_data);
         let wrapper = &*((*plugin).plugin_data as *const Self);
 
+        wrapper.is_active.store(false, Ordering::SeqCst);
         wrapper.plugin.lock().deactivate();
     }
 
